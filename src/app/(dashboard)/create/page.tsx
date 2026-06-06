@@ -1,6 +1,7 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect, Suspense } from 'react';
+import { useSearchParams } from 'next/navigation';
 import { Platform, PLATFORM_CONFIG, ContentVersion } from '@/types';
 import { cn } from '@/lib/utils';
 
@@ -11,8 +12,17 @@ const platforms: { key: Platform; label: string; icon: string }[] = [
   { key: 'bilibili', label: 'B站', icon: '📺' },
 ];
 
-export default function CreatePage() {
-  const [topic, setTopic] = useState('');
+interface SavedContent {
+  id: string;
+  versions: ContentVersion[];
+  topic?: { id: string; title: string };
+}
+
+function CreatePageContent() {
+  const searchParams = useSearchParams();
+  const topicParam = searchParams.get('topic');
+  
+  const [topic, setTopic] = useState(decodeURIComponent(topicParam || ''));
   const [selectedPlatforms, setSelectedPlatforms] = useState<Platform[]>(['xiaohongshu', 'wechat', 'douyin', 'bilibili']);
   const [loading, setLoading] = useState(false);
   const [versions, setVersions] = useState<ContentVersion[]>([]);
@@ -21,6 +31,15 @@ export default function CreatePage() {
   const [mode, setMode] = useState<'create' | 'rewrite'>('create');
   const [sourceContent, setSourceContent] = useState('');
   const [sourcePlatform, setSourcePlatform] = useState<Platform>('xiaohongshu');
+  const [savedContent, setSavedContent] = useState<SavedContent | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [publishing, setPublishing] = useState<Platform | null>(null);
+
+  useEffect(() => {
+    if (topicParam) {
+      setTopic(decodeURIComponent(topicParam));
+    }
+  }, [topicParam]);
 
   const togglePlatform = (p: Platform) => {
     setSelectedPlatforms(prev =>
@@ -34,12 +53,13 @@ export default function CreatePage() {
 
     setLoading(true);
     setError('');
+    setSavedContent(null);
     try {
       const res = await fetch('/api/content/generate', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          topic,
+          topic: topic || topicParam,
           platforms: selectedPlatforms,
           mode,
           sourceContent: mode === 'rewrite' ? sourceContent : undefined,
@@ -62,7 +82,35 @@ export default function CreatePage() {
     }
   };
 
-  const activeVersion = versions.find(v => v.platform === activeTab);
+  const handleSave = async () => {
+    if (versions.length === 0) return;
+    
+    setSaving(true);
+    try {
+      const res = await fetch('/api/content', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          topicId: savedContent?.topic?.id,
+          versions: versions.map(v => ({
+            platform: v.platform,
+            title: v.title,
+            body: v.body,
+            tags: v.tags,
+            wordCount: v.wordCount,
+          })),
+        }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        setSavedContent(data.data);
+      }
+    } catch {
+      setError('保存失败');
+    } finally {
+      setSaving(false);
+    }
+  };
 
   const handleEditBody = (newBody: string) => {
     setVersions(prev =>
@@ -73,6 +121,55 @@ export default function CreatePage() {
       )
     );
   };
+
+  const handlePublish = async (platform: Platform) => {
+    const version = versions.find(v => v.platform === platform);
+    if (!version) return;
+
+    setPublishing(platform);
+    try {
+      const res = await fetch('/api/publish', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          platform,
+          content: version,
+        }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        alert(`发布成功！链接: ${data.data?.url || '无'}`);
+      } else if (data.fallback) {
+        alert(`${platform} 平台暂不支持自动发布，已为您准备好导出版本。`);
+      } else {
+        alert(`发布失败: ${data.error}`);
+      }
+    } catch {
+      alert('发布失败，请稍后重试');
+    } finally {
+      setPublishing(null);
+    }
+  };
+
+  const handleExport = (platform: Platform) => {
+    const version = versions.find(v => v.platform === platform);
+    if (!version) return;
+
+    const config = PLATFORM_CONFIG[platform];
+    const markdown = `# ${version.title}\n\n${version.body}\n\n${version.tags.length > 0 ? `标签: ${version.tags.map(t => '#' + t).join(' ')}` : ''}`;
+    
+    const blob = new Blob([markdown], { type: 'text/markdown;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${config.nameCN}_${version.title.replace(/[/\\?%*:|"<>]/g, '-')}.md`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
+
+  const activeVersion = versions.find(v => v.platform === activeTab);
 
   return (
     <div className="space-y-6 animate-fade-in">
@@ -189,88 +286,133 @@ export default function CreatePage() {
 
       {/* Results */}
       {versions.length > 0 && (
-        <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
-          {/* Platform Tabs */}
-          <div className="flex border-b border-gray-200">
-            {versions.map(v => (
-              <button
-                key={v.platform}
-                onClick={() => setActiveTab(v.platform)}
-                className={cn(
-                  'px-5 py-3 text-sm font-medium transition-colors border-b-2',
-                  activeTab === v.platform
-                    ? 'text-orange-600 border-orange-500 bg-orange-50/50'
-                    : 'text-gray-500 border-transparent hover:text-gray-700'
-                )}
-              >
-                {PLATFORM_CONFIG[v.platform].icon} {PLATFORM_CONFIG[v.platform].nameCN}
-                {v.isEdited && <span className="ml-1 text-xs text-orange-400">已编辑</span>}
-              </button>
-            ))}
+        <>
+          {/* Save Button */}
+          <div className="flex justify-end">
+            <button
+              onClick={handleSave}
+              disabled={saving}
+              className={cn(
+                'px-5 py-2.5 rounded-lg text-sm font-medium transition-colors',
+                saving
+                  ? 'bg-gray-100 text-gray-400 cursor-not-allowed'
+                  : savedContent
+                  ? 'bg-green-500 text-white hover:bg-green-600'
+                  : 'bg-orange-500 text-white hover:bg-orange-600'
+              )}
+            >
+              {saving ? '保存中...' : savedContent ? '✅ 已保存' : '💾 保存内容'}
+            </button>
           </div>
 
-          {/* Content */}
-          {activeVersion && (
-            <div className="p-5 space-y-4">
-              {/* Title */}
-              <div>
-                <label className="text-xs text-gray-400 mb-1 block">标题</label>
-                <input
-                  type="text"
-                  value={activeVersion.title}
-                  onChange={e => {
-                    setVersions(prev =>
-                      prev.map(v =>
-                        v.platform === activeTab
-                          ? { ...v, title: e.target.value, isEdited: true }
-                          : v
-                      )
-                    );
-                  }}
-                  className="w-full px-3 py-2 rounded-lg border border-gray-200 text-sm font-medium focus:border-orange-400 outline-none"
-                />
-              </div>
-
-              {/* Body */}
-              <div>
-                <div className="flex items-center justify-between mb-1">
-                  <label className="text-xs text-gray-400">正文</label>
-                  <span className="text-xs text-gray-400">{activeVersion.wordCount} 字</span>
-                </div>
-                <textarea
-                  value={activeVersion.body}
-                  onChange={e => handleEditBody(e.target.value)}
-                  rows={12}
-                  className="w-full px-3 py-2 rounded-lg border border-gray-200 text-sm leading-relaxed focus:border-orange-400 outline-none resize-none"
-                />
-              </div>
-
-              {/* Tags */}
-              <div>
-                <label className="text-xs text-gray-400 mb-1 block">标签</label>
-                <div className="flex flex-wrap gap-1.5">
-                  {activeVersion.tags.map(tag => (
-                    <span key={tag} className="tag">#{tag}</span>
-                  ))}
-                </div>
-              </div>
-
-              {/* Actions */}
-              <div className="flex gap-3 pt-2">
-                <button className="px-4 py-2 rounded-lg bg-orange-500 text-white text-sm font-medium hover:bg-orange-600 transition-colors">
-                  🚀 发布到{PLATFORM_CONFIG[activeTab].nameCN}
+          <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
+            {/* Platform Tabs */}
+            <div className="flex border-b border-gray-200">
+              {versions.map(v => (
+                <button
+                  key={v.platform}
+                  onClick={() => setActiveTab(v.platform)}
+                  className={cn(
+                    'px-5 py-3 text-sm font-medium transition-colors border-b-2',
+                    activeTab === v.platform
+                      ? 'text-orange-600 border-orange-500 bg-orange-50/50'
+                      : 'text-gray-500 border-transparent hover:text-gray-700'
+                  )}
+                >
+                  {PLATFORM_CONFIG[v.platform].icon} {PLATFORM_CONFIG[v.platform].nameCN}
+                  {v.isEdited && <span className="ml-1 text-xs text-orange-400">已编辑</span>}
                 </button>
-                <button className="px-4 py-2 rounded-lg bg-gray-100 text-gray-700 text-sm font-medium hover:bg-gray-200 transition-colors">
-                  📥 导出
-                </button>
-                <button className="px-4 py-2 rounded-lg bg-gray-100 text-gray-700 text-sm font-medium hover:bg-gray-200 transition-colors">
-                  🔄 重新生成
-                </button>
-              </div>
+              ))}
             </div>
-          )}
-        </div>
+
+            {/* Content */}
+            {activeVersion && (
+              <div className="p-5 space-y-4">
+                {/* Title */}
+                <div>
+                  <label className="text-xs text-gray-400 mb-1 block">标题</label>
+                  <input
+                    type="text"
+                    value={activeVersion.title}
+                    onChange={e => {
+                      setVersions(prev =>
+                        prev.map(v =>
+                          v.platform === activeTab
+                            ? { ...v, title: e.target.value, isEdited: true }
+                            : v
+                        )
+                      );
+                    }}
+                    className="w-full px-3 py-2 rounded-lg border border-gray-200 text-sm font-medium focus:border-orange-400 outline-none"
+                  />
+                </div>
+
+                {/* Body */}
+                <div>
+                  <div className="flex items-center justify-between mb-1">
+                    <label className="text-xs text-gray-400">正文</label>
+                    <span className="text-xs text-gray-400">{activeVersion.wordCount} 字</span>
+                  </div>
+                  <textarea
+                    value={activeVersion.body}
+                    onChange={e => handleEditBody(e.target.value)}
+                    rows={12}
+                    className="w-full px-3 py-2 rounded-lg border border-gray-200 text-sm leading-relaxed focus:border-orange-400 outline-none resize-none"
+                  />
+                </div>
+
+                {/* Tags */}
+                <div>
+                  <label className="text-xs text-gray-400 mb-1 block">标签</label>
+                  <div className="flex flex-wrap gap-1.5">
+                    {activeVersion.tags.map(tag => (
+                      <span key={tag} className="tag">#{tag}</span>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Actions */}
+                <div className="flex gap-3 pt-2">
+                  <button
+                    onClick={() => handlePublish(activeTab)}
+                    disabled={publishing === activeTab}
+                    className={cn(
+                      'px-4 py-2 rounded-lg text-sm font-medium transition-colors',
+                      activeTab === 'wechat'
+                        ? 'bg-green-500 text-white hover:bg-green-600'
+                        : 'bg-orange-500 text-white hover:bg-orange-600',
+                      publishing === activeTab && 'opacity-50 cursor-not-allowed'
+                    )}
+                  >
+                    {publishing === activeTab ? '发布中...' : `🚀 发布到${PLATFORM_CONFIG[activeTab].nameCN}`}
+                  </button>
+                  <button
+                    onClick={() => handleExport(activeTab)}
+                    className="px-4 py-2 rounded-lg bg-gray-100 text-gray-700 text-sm font-medium hover:bg-gray-200 transition-colors"
+                  >
+                    📥 导出
+                  </button>
+                  <button
+                    onClick={handleGenerate}
+                    disabled={loading}
+                    className="px-4 py-2 rounded-lg bg-gray-100 text-gray-700 text-sm font-medium hover:bg-gray-200 transition-colors"
+                  >
+                    🔄 重新生成
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        </>
       )}
     </div>
+  );
+}
+
+export default function CreatePage() {
+  return (
+    <Suspense fallback={<div className="space-y-6 animate-fade-in"><div className="skeleton h-96 w-full rounded-xl" /></div>}>
+      <CreatePageContent />
+    </Suspense>
   );
 }

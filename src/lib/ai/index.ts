@@ -6,6 +6,7 @@ import {
   Topic,
   Platform,
   PLATFORM_CONFIG,
+  Persona,
 } from '@/types';
 import { buildPersonaPrompt, buildRewritePrompt } from '@/lib/persona';
 
